@@ -21,6 +21,7 @@ import { redactSecrets, sdkFailure } from "../errors.js";
 import { ensurePrivateDir } from "../core/lineage-store.js";
 import { credentialFingerprint } from "../digest.js";
 import { fetchCursorDashboardQuota } from "../account/cursor-dashboard.js";
+import { writeWorkspaceGrounding } from "../cursor-sdk-bridge/grounding.js";
 
 const require = createRequire(import.meta.url);
 
@@ -216,6 +217,10 @@ export function createCursorRuntime(options: { stateDir: string }): SdkRuntime {
     async createAgent(input: CreateAgentInput): Promise<SdkAgent> {
       const customTools = input.customTools;
       const resources = tenantResources(input.apiKey, input.workspaceDir);
+      const grounding = input.grounding;
+      if (grounding && (grounding.cwd || grounding.roots.length > 0)) {
+        writeWorkspaceGrounding(resources.workspaceDir, grounding);
+      }
       let agent;
       try {
         agent = await Agent.create({
@@ -228,7 +233,7 @@ export function createCursorRuntime(options: { stateDir: string }): SdkRuntime {
           disallowedTools: [...AMBIENT_DISALLOWED_TOOLS] as never,
           local: {
             cwd: resources.workspaceDir,
-            settingSources: [],
+            settingSources: (input.grounding?.cwd || input.grounding?.roots?.length) ? ["project"] : [],
             customTools: customTools as never,
             store: resources.store,
           },
@@ -241,6 +246,10 @@ export function createCursorRuntime(options: { stateDir: string }): SdkRuntime {
     async resumeAgent(input: ResumeAgentInput): Promise<SdkAgent> {
       const customTools = input.customTools;
       const resources = tenantResources(input.apiKey, input.workspaceDir);
+      const grounding = input.grounding;
+      if (grounding && (grounding.cwd || grounding.roots.length > 0)) {
+        writeWorkspaceGrounding(resources.workspaceDir, grounding);
+      }
       let agent;
       try {
         agent = await Agent.resume(input.agentId, {
@@ -253,7 +262,7 @@ export function createCursorRuntime(options: { stateDir: string }): SdkRuntime {
           disallowedTools: [...AMBIENT_DISALLOWED_TOOLS] as never,
           local: {
             cwd: resources.workspaceDir,
-            settingSources: [],
+            settingSources: (input.grounding?.cwd || input.grounding?.roots?.length) ? ["project"] : [],
             customTools: customTools as never,
             store: resources.store,
           },
