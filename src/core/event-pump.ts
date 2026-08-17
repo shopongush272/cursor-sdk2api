@@ -4,6 +4,7 @@ import { messageId } from "../ids.js";
 import type { AnthropicContentBlock, AssistantTurn } from "../protocols/anthropic/types.js";
 import type { SdkDeltaUpdate, SdkRun, SdkStreamEvent } from "../sdk/port.js";
 import { deferredUsage, fromSdkUsage } from "./usage.js";
+import { rewriteAssistantSurface } from "../cursor-sdk-bridge/identity.js";
 import type { PendingCall, Session } from "./session.js";
 
 export type PumpBoundary =
@@ -29,6 +30,10 @@ export class EventPump {
   private firstEvent = false;
   private text = "";
   private thinking = "";
+  private rawText = "";
+  private rawThinking = "";
+  private emittedText = "";
+  private emittedThinking = "";
   private error: unknown;
   /** Current response-segment boundary. All same-segment waiters read this. */
   private publishedBoundary?: PumpBoundary;
@@ -74,6 +79,7 @@ export class EventPump {
     this.boundaryWaiters = [];
     this.text = "";
     this.thinking = "";
+    this.resetSurface();
     this.segmentMessageId = messageId();
   }
 
@@ -132,14 +138,10 @@ export class EventPump {
     this.firstEvent = true;
     this.session.hasSemanticOutput = true;
     if (update.type === "thinking-delta") {
-      this.thinking += update.text;
-      this.deltaHistory.push({ kind: "thinking", text: update.text });
-      for (const sink of this.sinks) sink.onThinking?.(update.text);
+      this.pushSurface("thinking", update.text);
       return;
     }
-    this.text += update.text;
-    this.deltaHistory.push({ kind: "text", text: update.text });
-    for (const sink of this.sinks) sink.onText?.(update.text);
+    this.pushSurface("text", update.text);
   }
 
   ingestDeltas(updates: SdkDeltaUpdate[]): void {
@@ -169,8 +171,9 @@ export class EventPump {
         this.fail(upstreamError("SDK run cancelled", 499));
         return;
       }
-      const finalText = result.result || this.text;
-      if (!finalText && !this.thinking && !this.session.sawToolBatch) {
+      const finalText = rewriteAssistantSurface(result.result || this.rawText || this.text, this.session.clientBrand);
+      const finalThinking = rewriteAssistantSurface(this.thinking, this.session.clientBrand);
+      if (!finalText && !finalThinking && !this.session.sawToolBatch) {
         this.fail(emptyTurn());
         return;
       }
@@ -178,7 +181,7 @@ export class EventPump {
         this.session.usageConfirmed = true;
       }
       const blocks: AnthropicContentBlock[] = [];
-      if (this.thinking) blocks.push({ type: "thinking", thinking: this.thinking });
+      if (finalThinking) blocks.push({ type: "thinking", thinking: finalThinking });
       if (finalText) blocks.push({ type: "text", text: finalText });
       if (blocks.length === 0) {
         this.fail(emptyTurn());
@@ -209,17 +212,13 @@ export class EventPump {
       return;
     }
     if (event.type === "thinking" && event.text) {
-      this.thinking += event.text;
       this.session.hasSemanticOutput = true;
-      this.deltaHistory.push({ kind: "thinking", text: event.text });
-      for (const sink of this.sinks) sink.onThinking?.(event.text);
+      this.pushSurface("thinking", event.text);
       return;
     }
     if (event.type === "assistant" && event.text) {
-      this.text += event.text;
       this.session.hasSemanticOutput = true;
-      this.deltaHistory.push({ kind: "text", text: event.text });
-      for (const sink of this.sinks) sink.onText?.(event.text);
+      this.pushSurface("text", event.text);
     }
   }
 
@@ -232,6 +231,7 @@ export class EventPump {
     if (this.text) blocks.push({ type: "text", text: this.text });
     this.thinking = "";
     this.text = "";
+    this.resetSurface();
     for (const call of batch) {
       blocks.push({
         type: "tool_use",
@@ -256,6 +256,37 @@ export class EventPump {
   private fail(error: unknown): void {
     this.error = error;
     this.publish({ type: "error", error });
+  }
+
+
+  private resetSurface(): void {
+    this.rawText = "";
+    this.rawThinking = "";
+    this.emittedText = "";
+    this.emittedThinking = "";
+  }
+
+  private pushSurface(kind: "text" | "thinking", incoming: string): void {
+    if (!incoming) return;
+    if (kind === "thinking") {
+      this.rawThinking += incoming;
+      const rewritten = rewriteAssistantSurface(this.rawThinking, this.session.clientBrand);
+      const delta = rewritten.slice(this.emittedThinking.length);
+      this.emittedThinking = rewritten;
+      this.thinking = rewritten;
+      if (!delta) return;
+      this.deltaHistory.push({ kind: "thinking", text: delta });
+      for (const sink of this.sinks) sink.onThinking?.(delta);
+      return;
+    }
+    this.rawText += incoming;
+    const rewritten = rewriteAssistantSurface(this.rawText, this.session.clientBrand);
+    const delta = rewritten.slice(this.emittedText.length);
+    this.emittedText = rewritten;
+    this.text = rewritten;
+    if (!delta) return;
+    this.deltaHistory.push({ kind: "text", text: delta });
+    for (const sink of this.sinks) sink.onText?.(delta);
   }
 
   private publish(boundary: PumpBoundary): void {
