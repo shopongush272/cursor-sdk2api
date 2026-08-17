@@ -1,11 +1,4 @@
-export const AMBIENT_DISALLOWED_TOOLS = [
-  "shell",
-  "read",
-  "edit",
-  "task",
-  "webSearch",
-  "webFetch",
-] as const;
+export { AMBIENT_DISALLOWED_TOOLS, apiProfileToolAllowlist } from "../cursor-sdk-bridge/tools.js";
 
 export interface SdkModelParameter {
   id: string;
@@ -125,6 +118,7 @@ export interface CreateAgentInput {
   workspaceDir: string;
   clientToolNames: string[];
   customTools: Record<string, SdkCustomTool>;
+  grounding?: { cwd?: string; roots: string[]; platform?: string };
 }
 
 export interface ResumeAgentInput extends CreateAgentInput {
@@ -152,8 +146,4 @@ export interface SdkRuntime {
   resumeAgent(input: ResumeAgentInput): Promise<SdkAgent>;
   listModels(apiKey: string): Promise<SdkCatalogResult>;
   getAccount(apiKey: string): Promise<SdkAccountResult>;
-}
-
-export function apiProfileToolAllowlist(clientToolNames: string[]): string[] {
-  return clientToolNames.length > 0 ? ["mcp"] : [];
 }
