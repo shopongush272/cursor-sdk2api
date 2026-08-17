@@ -662,7 +662,7 @@ test("Responses required and named function tool_choice render harness directive
   });
   expect(res.status).toBe(200);
   expect(ctx.sdk.agents[0]?.lastSend?.text).toContain("must call at least one available custom MCP tool");
-  expect(ctx.sdk.agents[0]?.lastSend?.text).toContain("Never use the SDK runtime cwd in tool arguments");
+  expect(ctx.sdk.agents[0]?.lastSend?.text).toMatch(/caller's machine/i);
 
   const named = await api(ctx, "/v1/responses", {
     method: "POST",
