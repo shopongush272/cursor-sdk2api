@@ -8,6 +8,10 @@ import type {
   ParsedToolResult,
 } from "./types.js";
 import { parseAnthropicToolChoice, toolChoiceDirective } from "../tool-choice.js";
+import { applyClaudeCodeCliBridge } from "../../cursor-sdk-bridge/claude-code.js";
+import { resolveClientBrand } from "../../cursor-sdk-bridge/identity.js";
+import { collectClientWorkspace } from "../../cursor-sdk-bridge/workspace.js";
+import { groundingPromptHead, groundingPromptTail, inferPlatform } from "../../cursor-sdk-bridge/grounding.js";
 
 export function parseMessagesRequest(body: unknown): ParsedMessages {
   if (!body || typeof body !== "object") {
@@ -21,7 +25,11 @@ export function parseMessagesRequest(body: unknown): ParsedMessages {
     throw invalidRequest("messages must be a non-empty array");
   }
 
-  const messages = raw.messages.map(parseMessage);
+  const normalized = normalizeRawMessages(raw.messages);
+  if (normalized.messages.length === 0) {
+    throw invalidRequest("messages must be a non-empty array");
+  }
+  const messages = normalized.messages.map(parseMessage);
   const tools = Array.isArray(raw.tools) ? raw.tools.map(parseTool) : [];
   const names = new Set<string>();
   for (const tool of tools) {
@@ -40,17 +48,21 @@ export function parseMessagesRequest(body: unknown): ParsedMessages {
     names,
   );
 
+  const assembledSystem = [parseSystem(raw.system), ...normalized.extraSystem].filter(Boolean).join("\n");
+  const cliBridge = applyClaudeCodeCliBridge(assembledSystem, messages);
   return {
     model: raw.model.trim(),
     modelParams: parseModelParams(raw),
     stream: raw.stream === true,
-    systemText: parseSystem(raw.system),
+    systemText: cliBridge ? "" : assembledSystem,
     messages,
     tools,
     images,
     lastUser,
     continuation,
     toolChoice,
+    ...(cliBridge ? { cliBridge } : {}),
+    clientBrand: resolveClientBrand({ model: raw.model.trim(), cliKind: cliBridge?.kind, protocol: "messages" }),
   };
 }
 
@@ -96,6 +108,65 @@ export function parseModelParams(raw: Record<string, unknown>): Array<{ id: stri
   return [...params.entries()]
     .map(([id, value]) => ({ id, value }))
     .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function normalizeRawMessages(values: unknown[]): { messages: unknown[]; extraSystem: string[] } {
+  const messages: unknown[] = [];
+  const extraSystem: string[] = [];
+  for (const value of values) {
+    if (!value || typeof value !== "object") {
+      messages.push(value);
+      continue;
+    }
+    const raw = value as Record<string, unknown>;
+    if (raw.role === "system" || raw.role === "developer") {
+      const text = extractRoleText(raw.content);
+      if (text) extraSystem.push(text);
+      continue;
+    }
+    if (raw.role === "tool" || raw.role === "function") {
+      messages.push(normalizeToolRoleMessage(raw));
+      continue;
+    }
+    messages.push(value);
+  }
+  return { messages, extraSystem };
+}
+
+function extractRoleText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (block && typeof block === "object" && (block as { type?: string }).type === "text") {
+        return String((block as { text?: string }).text ?? "");
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value) return value;
+  }
+  return undefined;
+}
+
+function normalizeToolRoleMessage(raw: Record<string, unknown>): Record<string, unknown> {
+  const toolUseId = firstNonEmptyString(raw.tool_call_id, raw.id, raw.name) ?? "tool";
+  return {
+    role: "user",
+    content: [
+      {
+        type: "tool_result",
+        tool_use_id: toolUseId,
+        content: raw.content,
+        ...(raw.is_error !== undefined ? { is_error: raw.is_error === true } : {}),
+      },
+    ],
+  };
 }
 
 function parseMessage(value: unknown): AnthropicMessage {
@@ -239,17 +310,36 @@ export function stringifyToolResult(content: unknown): string {
   }
 }
 
+export function collectPromptWorkspaceTexts(parsed: ParsedMessages): string[] {
+  const texts = [
+    parsed.systemText,
+    ...parsed.messages.flatMap((message) =>
+      asBlocks(message.content)
+        .filter((block): block is Extract<AnthropicContentBlock, { type: "text" }> => block.type === "text")
+        .map((block) => block.text),
+    ),
+  ];
+  if (parsed.cliBridge?.cwd) texts.push(`<cwd>${parsed.cliBridge.cwd}</cwd>`);
+  if (parsed.cliBridge?.roots?.length) {
+    texts.push(
+      `<workspace_roots>${parsed.cliBridge.roots.map((root) => `<root>${root}</root>`).join("")}</workspace_roots>`,
+    );
+  }
+  return texts;
+}
+
 export function renderPrompt(parsed: ParsedMessages): { text: string; images: Array<{ data: string; mimeType: string }> } {
   const parts: string[] = [];
+  let grounding: { cwd?: string; roots: string[]; platform?: string } | undefined;
   if (parsed.tools.length > 0) {
-    parts.push(
-      [
-        "HARNESS TOOL CONTEXT:",
-        "The custom MCP tools execute in the API caller's environment, not in the Cursor SDK runtime workspace.",
-        "Never use the SDK runtime cwd in tool arguments. Treat workspace metadata supplied by the client as authoritative.",
-        "Prefer relative paths when the tool schema allows them. If a tool requires an absolute path, resolve it against the client's workspace path.",
-      ].join("\n"),
-    );
+    const collected = collectClientWorkspace(collectPromptWorkspaceTexts(parsed));
+    const cwd = collected.cwd ?? parsed.cliBridge?.cwd;
+    grounding = {
+      cwd,
+      roots: collected.roots.length > 0 ? collected.roots : (parsed.cliBridge?.roots ?? []),
+      platform: parsed.cliBridge?.platform ?? inferPlatform(cwd),
+    };
+    parts.push(groundingPromptHead(grounding, parsed.cliBridge?.kind).join("\n"));
   }
   if (parsed.systemText) parts.push(`System:\n${parsed.systemText}`);
   const messages = parsed.continuation ? parsed.messages.slice(0, -1) : parsed.messages;
@@ -262,7 +352,8 @@ export function renderPrompt(parsed: ParsedMessages): { text: string; images: Ar
           return `[tool_use ${block.name} ${block.id}]`;
         }
         if (block.type === "tool_result") {
-          return `[tool_result ${block.tool_use_id}]`;
+          const content = stringifyToolResult(block.content);
+          return content ? `[tool_result ${block.tool_use_id}]\n${content}` : `[tool_result ${block.tool_use_id}]`;
         }
         if (block.type === "image") return "[image]";
         return "";
@@ -271,6 +362,7 @@ export function renderPrompt(parsed: ParsedMessages): { text: string; images: Ar
       .join("\n");
     if (text) parts.push(`${message.role}:\n${text}`);
   }
+  if (grounding) parts.push(groundingPromptTail(grounding).join("\n"));
   const directive = toolChoiceDirective(parsed.toolChoice, parsed.tools.length > 0);
   if (directive) parts.push(directive);
   return { text: parts.join("\n\n") || " ", images: parsed.images };
