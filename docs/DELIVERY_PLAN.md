@@ -77,3 +77,15 @@
 - `settingSources: ["project"]` when host grounding is present (isolated workspace AGENTS.md only); otherwise `[]`. user/team/mdm stay off.
 - 使用空 workspace；不把调用者仓库、环境变量或文件系统隐式传给 Cursor。
 - Claude Code/OpenCode/Codex 是外层 Agent；Cursor Harness 负责模型推理和工具选择。
+
+### 5.2 Agent Profile — Post-v0.3 Optional Surface
+
+未来独立 `/v1/agents` 承载：
+
+- Cursor native tools。
+- plan/agent mode。
+- fast/model parameters。
+- subagents、artifacts、branches 和 Cloud Agents。
+- 经明确配置加载的 settings、hooks、plugins 和 MCP。
+
+Agent Profile 不与兼容 API 默认路径混用；其权限、workspace 和外部副作用需要单独安全模型与发布合同。
