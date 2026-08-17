@@ -24,6 +24,8 @@ export interface AnthropicTool {
   name: string;
   description?: string;
   input_schema?: Record<string, unknown>;
+  /** Responses custom tools (Codex exec) must be re-emitted as custom_tool_call. */
+  wire?: "custom";
 }
 
 export interface AnthropicMessagesRequest {
@@ -75,4 +77,8 @@ export interface ParsedMessages {
   lastUser: AnthropicMessage | undefined;
   continuation: ParsedToolResult[] | undefined;
   toolChoice: import("../tool-choice.js").ToolChoicePolicy;
+  /** Set when a Claude Code CLI system/env preamble was stripped. */
+  cliBridge?: import("../../cursor-sdk-bridge/types.js").CursorSdkBridge;
+  /** Incoming client brand for outbound identity rewrite. */
+  clientBrand?: import("../../cursor-sdk-bridge/identity.js").ClientBrand;
 }

@@ -12,6 +12,7 @@ import {
 import type { Logger } from "../log.js";
 import type { ParsedMessages, ParsedToolResult } from "../protocols/anthropic/types.js";
 import { renderPrompt } from "../protocols/anthropic/parse.js";
+import { bindClientWorkspace, sessionGrounding } from "./workspace-bind.js";
 import { createAnthropicWriter } from "../protocols/anthropic/writer.js";
 import type { SdkDeltaUpdate, SdkRuntime } from "../sdk/port.js";
 import { EventPump, type PumpBoundary } from "./event-pump.js";
@@ -120,6 +121,7 @@ export class RunCoordinator {
       modelParams: parsed.modelParams,
     });
     const customTools = mapClientTools(parsed.tools, session, this.deps.clock, () => undefined);
+    bindClientWorkspace(session, parsed, this.deps.workspaceDir);
     try {
       const agent = await this.deps.sdk.createAgent({
         apiKey: auth.cursorApiKey,
@@ -128,6 +130,7 @@ export class RunCoordinator {
         workspaceDir: this.deps.workspaceDir,
         clientToolNames: parsed.tools.map((tool) => tool.name),
         customTools,
+        grounding: sessionGrounding(session),
       });
       session.agent = agent;
       session.sdkAgentId = agent.agentId;
@@ -190,6 +193,7 @@ export class RunCoordinator {
     session.replay = undefined;
     session.appliedBoundaryId = undefined;
     const customTools = mapClientTools(parsed.tools, session, this.deps.clock, () => undefined);
+    bindClientWorkspace(session, parsed, this.deps.workspaceDir);
     const prompt = renderPrompt(parsed);
     const deltas = createDeltaBridge();
     try {
@@ -385,6 +389,7 @@ export class RunCoordinator {
     this.deps.registry.adopt(session);
 
     const customTools = mapClientTools(parsed.tools, session, this.deps.clock, () => undefined);
+    bindClientWorkspace(session, parsed, this.deps.workspaceDir);
     const deltas = createDeltaBridge();
     try {
       const agent = await this.deps.sdk.resumeAgent({
@@ -395,6 +400,7 @@ export class RunCoordinator {
         workspaceDir: this.deps.workspaceDir,
         clientToolNames: parsed.tools.map((tool) => tool.name),
         customTools,
+        grounding: sessionGrounding(session),
       });
       session.agent = agent;
       session.sdkAgentId = record.sdkAgentId;
@@ -547,6 +553,7 @@ export class RunCoordinator {
     this.deps.registry.adopt(session);
     try {
       const customTools = mapClientTools(parsed.tools, session, this.deps.clock, () => undefined);
+      bindClientWorkspace(session, parsed, this.deps.workspaceDir);
       const agent = await this.deps.sdk.resumeAgent({
         agentId: record.sdkAgentId,
         apiKey: auth.cursorApiKey,
@@ -555,6 +562,7 @@ export class RunCoordinator {
         workspaceDir: this.deps.workspaceDir,
         clientToolNames: parsed.tools.map((tool) => tool.name),
         customTools,
+        grounding: sessionGrounding(session),
       });
       session.agent = agent;
       session.sdkAgentId = record.sdkAgentId;

@@ -34,6 +34,7 @@ import { writeSseError } from "../protocols/anthropic/sse.js";
 import { parseChatCompletionsRequest } from "../protocols/openai-chat/parse.js";
 import { writeChatStreamError } from "../protocols/openai-chat/sse.js";
 import { createChatWriterFactory } from "../protocols/openai-chat/writer.js";
+import { describeCodexOutputShape, isCodexHistoryOutput } from "../protocols/openai-responses/codex-cursor.js";
 import { parseResponsesRequest } from "../protocols/openai-responses/parse.js";
 import { writeResponsesStreamError } from "../protocols/openai-responses/sse.js";
 import { createResponsesWriterFactory } from "../protocols/openai-responses/writer.js";
@@ -466,6 +467,50 @@ export function createApp(input: {
         const body = await readJsonBody(req, config.maxBodyBytes);
         if (body === undefined) throw invalidRequest("JSON body is required");
         const responses = parseResponsesRequest(body);
+        const inputItems = Array.isArray((body as { input?: unknown })?.input)
+          ? ((body as { input: unknown[] }).input)
+          : [];
+        const outputShapes = inputItems.flatMap((item) => {
+          if (!item || typeof item !== "object") return [];
+          const raw = item as Record<string, unknown>;
+          const type = typeof raw.type === "string" ? raw.type : "";
+          if (!isCodexHistoryOutput(type)) return [];
+          return [describeCodexOutputShape(raw.output !== undefined ? raw.output : raw.result)];
+        });
+        const toolResultChars = responses.parsed.messages.flatMap((message) => {
+          if (!Array.isArray(message.content)) return [];
+          return message.content
+            .filter((block) => block.type === "tool_result")
+            .map((block) => String(block.content ?? "").length);
+        });
+        logger.info({
+          request_id: requestId,
+          model: responses.parsed.model,
+          tool_names: responses.parsed.tools.map((t) => t.name),
+          custom_tool_names: responses.parsed.tools.filter((t) => t.wire === "custom").map((t) => t.name),
+          input_item_types: inputItems.length
+            ? inputItems
+                .map((i) => (i && typeof i === "object" ? (i as { type?: string }).type : undefined))
+                .filter(Boolean)
+                .slice(0, 40)
+            : typeof (body as { input?: unknown })?.input,
+          tools_field: Array.isArray((body as { tools?: unknown })?.tools)
+            ? "array"
+            : (body as { tools?: unknown })?.tools === null
+              ? "null"
+              : typeof (body as { tools?: unknown })?.tools,
+          lite: headerValue(req, "x-openai-internal-codex-responses-lite") === "true",
+          ...(outputShapes[0]
+            ? {
+                output_kind: outputShapes[0].output_kind,
+                output_keys: outputShapes[0].output_keys,
+                item_types: outputShapes[0].item_types,
+                tool_result_chars: toolResultChars[0] ?? outputShapes[0].tool_result_chars,
+                text_empty: (toolResultChars[0] ?? outputShapes[0].tool_result_chars) === 0,
+                output_count: outputShapes.length,
+              }
+            : {}),
+        }, outputShapes.length > 0 ? "responses catalog tool_result" : "responses catalog");
         const sessionHint = headerValue(req, "x-cursor-session-id");
         const auth = await resolveAuth(client, responses.parsed, sessionHint);
         await coordinator.handleMessages(

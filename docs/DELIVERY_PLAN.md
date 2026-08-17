@@ -74,7 +74,7 @@
 - 请求 `tools[]` 动态映射为 `local.customTools`。
 - SDK tool surface 限制为 MCP/customTools。
 - 默认禁用 `shell`、`read`、`edit`、`task`、`webSearch`、`webFetch`。
-- `settingSources: []`，不加载宿主机用户或项目 Cursor 配置。
+- `settingSources: ["project"]` when host grounding is present (isolated workspace AGENTS.md only); otherwise `[]`. user/team/mdm stay off.
 - 使用空 workspace；不把调用者仓库、环境变量或文件系统隐式传给 Cursor。
 - Claude Code/OpenCode/Codex 是外层 Agent；Cursor Harness 负责模型推理和工具选择。
 

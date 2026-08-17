@@ -7,6 +7,7 @@ import type {
 } from "../anthropic/types.js";
 import type { ParsedChatCompletions } from "./types.js";
 import { parseOpenAiToolChoice } from "../tool-choice.js";
+import { resolveClientBrand } from "../../cursor-sdk-bridge/identity.js";
 
 export function parseChatCompletionsRequest(body: unknown): ParsedChatCompletions {
   if (!body || typeof body !== "object") {
@@ -92,6 +93,7 @@ export function parseChatCompletionsRequest(body: unknown): ParsedChatCompletion
       lastUser,
       continuation,
       toolChoice,
+      clientBrand: resolveClientBrand({ model: raw.model.trim(), protocol: "chat" }),
     },
     includeUsage: readIncludeUsage(raw),
   };

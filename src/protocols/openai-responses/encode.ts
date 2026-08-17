@@ -1,5 +1,6 @@
 import { responseId } from "../../ids.js";
 import type { AnthropicContentBlock, AssistantTurn } from "../anthropic/types.js";
+import { encodeCodexExecInput, encodeCodexToolOutput } from "./codex-cursor.js";
 import type { ResponsesStatus } from "./types.js";
 
 export interface ResponsesUsage {
@@ -55,6 +56,27 @@ export function functionCallItemId(callId: string): string {
   return callId.startsWith("fc_") ? callId : `fc_${callId}`;
 }
 
+export function customToolCallItemId(callId: string): string {
+  return callId.startsWith("ctc_") ? callId : `ctc_${callId}`;
+}
+
+export { encodeCodexToolOutput };
+
+export function encodeCustomToolInput(input: unknown): string {
+  if (input === null || input === undefined) return "";
+  if (typeof input === "string") return input;
+  if (
+    input &&
+    typeof input === "object" &&
+    !Array.isArray(input) &&
+    Object.keys(input as object).length === 1 &&
+    typeof (input as { input?: unknown }).input === "string"
+  ) {
+    return (input as { input: string }).input;
+  }
+  return JSON.stringify(input);
+}
+
 export function encodeReasoningItem(messageId: string, text: string): Record<string, unknown> {
   return {
     id: reasoningItemId(messageId),
@@ -78,7 +100,19 @@ export function encodeMessageItem(messageId: string, text: string, status = "com
 export function encodeFunctionCallItem(
   block: Extract<AnthropicContentBlock, { type: "tool_use" }>,
   status = "completed",
+  asCustom = false,
+  clientCwd?: string,
 ): Record<string, unknown> {
+  if (asCustom) {
+    return {
+      id: customToolCallItemId(block.id),
+      type: "custom_tool_call",
+      status,
+      call_id: block.id,
+      name: block.name,
+      input: block.name === "exec" ? encodeCodexExecInput(block.input, clientCwd) : encodeCustomToolInput(block.input),
+    };
+  }
   return {
     id: functionCallItemId(block.id),
     type: "function_call",
@@ -89,14 +123,20 @@ export function encodeFunctionCallItem(
   };
 }
 
-export function encodeResponsesOutput(turn: AssistantTurn): Record<string, unknown>[] {
+export function encodeResponsesOutput(
+  turn: AssistantTurn,
+  customToolNames?: ReadonlySet<string>,
+  clientCwd?: string,
+): Record<string, unknown>[] {
   const output: Record<string, unknown>[] = [];
   const thinking = textOf(turn.blocks, "thinking");
   if (thinking) output.push(encodeReasoningItem(turn.messageId, thinking));
   const text = textOf(turn.blocks, "text");
   if (text) output.push(encodeMessageItem(turn.messageId, text));
   for (const block of turn.blocks) {
-    if (block.type === "tool_use") output.push(encodeFunctionCallItem(block));
+    if (block.type === "tool_use") {
+      output.push(encodeFunctionCallItem(block, "completed", customToolNames?.has(block.name) === true, clientCwd));
+    }
   }
   return output;
 }
@@ -105,6 +145,8 @@ export function encodeResponse(
   turn: AssistantTurn,
   createdAt: number,
   extra: Record<string, unknown> = {},
+  customToolNames?: ReadonlySet<string>,
+  clientCwd?: string,
 ): Record<string, unknown> {
   const { status, incomplete_details } = mapResponseStatus(turn.stopReason);
   return {
@@ -115,7 +157,7 @@ export function encodeResponse(
     error: null,
     incomplete_details,
     model: turn.model,
-    output: encodeResponsesOutput(turn),
+    output: encodeResponsesOutput(turn, customToolNames, clientCwd),
     usage: encodeResponsesUsage(turn),
     cursor_session_id: turn.sessionId,
     ...extra,

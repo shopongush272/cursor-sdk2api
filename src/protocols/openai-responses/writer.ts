@@ -2,7 +2,10 @@ import { responseId } from "../../ids.js";
 import type { TurnWriter, TurnWriterContext, TurnWriterFactory } from "../../core/turn-writer.js";
 import { sendJson, sendOpenAIError } from "../../server/http-util.js";
 import type { AnthropicContentBlock, AssistantTurn } from "../anthropic/types.js";
+import { encodeCodexExecInput } from "./codex-cursor.js";
 import {
+  customToolCallItemId,
+  encodeCustomToolInput,
   encodeFunctionCallItem,
   encodeMessageItem,
   encodeReasoningItem,
@@ -64,7 +67,7 @@ class ResponsesTurnWriter implements TurnWriter {
         sendJson(
           this.ctx.res,
           200,
-          encodeResponse(turn, this.createdAt, extra?.replayed ? { replayed: true } : {}),
+          encodeResponse(turn, this.createdAt, extra?.replayed ? { replayed: true } : {}, this.ctx.session.customToolNames, this.ctx.session.clientCwd),
           this.ctx.requestId,
           { "x-cursor-session-id": turn.sessionId },
         );
@@ -77,7 +80,7 @@ class ResponsesTurnWriter implements TurnWriter {
     this.emit(
       "response.completed",
       {
-        response: encodeResponse(turn, this.createdAt, extra?.replayed ? { replayed: true } : {}),
+        response: encodeResponse(turn, this.createdAt, extra?.replayed ? { replayed: true } : {}, this.ctx.session.customToolNames, this.ctx.session.clientCwd),
       },
     );
     this.ctx.res.end();
@@ -189,6 +192,35 @@ class ResponsesTurnWriter implements TurnWriter {
   }
 
   private emitFunctionCall(block: Extract<AnthropicContentBlock, { type: "tool_use" }>): void {
+    if (this.ctx.session.customToolNames.has(block.name)) {
+      const outputIndex = this.nextOutputIndex++;
+      const itemId = customToolCallItemId(block.id);
+      const payload = block.name === "exec" ? encodeCodexExecInput(block.input, this.ctx.session.clientCwd) : encodeCustomToolInput(block.input);
+      this.emit("response.output_item.added", {
+        output_index: outputIndex,
+        item: {
+          ...encodeFunctionCallItem(block, "in_progress", true, this.ctx.session.clientCwd),
+          input: "",
+        },
+      });
+      if (payload) {
+        this.emit("response.custom_tool_call_input.delta", {
+          item_id: itemId,
+          output_index: outputIndex,
+          delta: payload,
+        });
+      }
+      this.emit("response.custom_tool_call_input.done", {
+        item_id: itemId,
+        output_index: outputIndex,
+        input: payload,
+      });
+      this.emit("response.output_item.done", {
+        output_index: outputIndex,
+        item: encodeFunctionCallItem(block, "completed", true, this.ctx.session.clientCwd),
+      });
+      return;
+    }
     const outputIndex = this.nextOutputIndex++;
     const itemId = functionCallItemId(block.id);
     const argumentsJson = JSON.stringify(block.input ?? {});

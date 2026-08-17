@@ -7,6 +7,17 @@ import type {
 } from "../anthropic/types.js";
 import type { ParsedResponses } from "./types.js";
 import { parseOpenAiToolChoice } from "../tool-choice.js";
+import { applyCodexBridge } from "../../cursor-sdk-bridge/codex.js";
+import { resolveClientBrand } from "../../cursor-sdk-bridge/identity.js";
+import {
+  encodeCodexToolOutput,
+  ensureCodexExecTool,
+  looksLikeCodexLite,
+  isCodexHistoryCall,
+  isCodexHistoryOutput,
+  mapCodexHistoryCall,
+  mapCodexHistoryOutput,
+} from "./codex-cursor.js";
 
 export function parseResponsesRequest(body: unknown): ParsedResponses {
   if (!body || typeof body !== "object") {
@@ -39,7 +50,8 @@ export function parseResponsesRequest(body: unknown): ParsedResponses {
   const parsedInput = parseInput(raw.input);
   systemParts.push(...parsedInput.systemParts);
   const messages = parsedInput.messages;
-  const tools = Array.isArray(raw.tools) ? raw.tools.map(parseResponsesTool) : [];
+  const rawTools = Array.isArray(raw.tools) ? raw.tools : collectFunctionToolsFromInput(raw.input);
+  const tools = ensureCodexExecTool(rawTools.map(parseResponsesTool), raw);
   const names = new Set<string>();
   for (const tool of tools) {
     if (names.has(tool.name)) throw invalidRequest(`duplicate tool name: ${tool.name}`);
@@ -56,18 +68,28 @@ export function parseResponsesRequest(body: unknown): ParsedResponses {
     "Responses",
   );
 
+  const assembled = systemParts.filter(Boolean).join("\n");
+  const bridge = applyCodexBridge(assembled, raw);
   return {
     parsed: {
       model: raw.model.trim(),
       modelParams: parseModelParams(raw),
       stream: raw.stream === true,
-      systemText: systemParts.filter(Boolean).join("\n"),
+      systemText: bridge ? "" : assembled,
       messages,
       tools,
       images,
       lastUser,
       continuation,
       toolChoice,
+      ...(bridge ? { cliBridge: bridge } : {}),
+      clientBrand: resolveClientBrand({
+        model: raw.model.trim(),
+        cliKind: bridge?.kind,
+        protocol: "responses",
+        looksLikeCodexLite: looksLikeCodexLite(raw),
+        hasExecTool: tools.some((tool) => tool.name === "exec" || tool.wire === "custom"),
+      }),
     },
   };
 }
@@ -106,10 +128,12 @@ function rejectUnsupported(raw: Record<string, unknown>): void {
     }
     const format = (text as { format?: unknown }).format;
     if (format !== undefined) {
-      const type = format && typeof format === "object" ? (format as { type?: unknown }).type : undefined;
-      if (type !== "text") {
-        throw invalidRequest('text.format must be omitted or {type:"text"}');
+      if (!format || typeof format !== "object" || Array.isArray(format)) {
+        throw invalidRequest("text.format must be an object if provided");
       }
+      // Codex / sub2api send json_schema (and other format types). Cursor SDK
+      // does not enforce structured output, so this known optional field is
+      // accepted but omitted.
     }
   }
 }
@@ -133,16 +157,50 @@ function parseInstructions(value: unknown): string {
   throw invalidRequest("instructions must be a string or text part array");
 }
 
+
+const HOSTED_RESPONSES_TOOLS = new Set(["web_search", "file_search", "computer", "shell", "apply_patch"]);
+
+function collectFunctionToolsFromInput(input: unknown): unknown[] {
+  if (!Array.isArray(input)) return [];
+  const tools: unknown[] = [];
+  const names = new Set<string>();
+  for (const item of input) {
+    if (!item || typeof item !== "object") continue;
+    const raw = item as Record<string, unknown>;
+    if (raw.type !== "additional_tools" || !Array.isArray(raw.tools)) continue;
+    for (const tool of raw.tools) {
+      if (!tool || typeof tool !== "object") continue;
+      const entry = tool as Record<string, unknown>;
+      if (entry.type === "namespace") continue;
+      const nested = entry.function && typeof entry.function === "object" ? (entry.function as Record<string, unknown>) : undefined;
+      const name = typeof entry.name === "string" ? entry.name : typeof nested?.name === "string" ? nested.name : "";
+      const type = typeof entry.type === "string" ? entry.type : "";
+      if (HOSTED_RESPONSES_TOOLS.has(type) || HOSTED_RESPONSES_TOOLS.has(name)) continue;
+      if (type !== "function" && type !== "custom" && name !== "exec") continue;
+      if (!name || names.has(name)) continue;
+      names.add(name);
+      tools.push(tool);
+    }
+  }
+  return tools;
+}
+
 function parseResponsesTool(value: unknown): AnthropicTool {
   if (!value || typeof value !== "object") throw invalidRequest("tool must be an object");
   const raw = value as Record<string, unknown>;
-  if (raw.type !== "function") {
+  const nested = raw.function && typeof raw.function === "object" ? (raw.function as Record<string, unknown>) : undefined;
+  const name = typeof raw.name === "string" ? raw.name : typeof nested?.name === "string" ? nested.name : undefined;
+  const type = typeof raw.type === "string" ? raw.type : "";
+  if (HOSTED_RESPONSES_TOOLS.has(type) || (name !== undefined && HOSTED_RESPONSES_TOOLS.has(name) && type !== "function" && type !== "custom")) {
     throw invalidRequest(
       `unsupported Responses tool type: ${String(raw.type)}; hosted tools (web_search, file_search, computer, shell, apply_patch) are not implemented`,
     );
   }
-  const nested = raw.function && typeof raw.function === "object" ? (raw.function as Record<string, unknown>) : undefined;
-  const name = typeof raw.name === "string" ? raw.name : typeof nested?.name === "string" ? nested.name : undefined;
+  if (type !== "function" && type !== "custom" && name !== "exec") {
+    throw invalidRequest(
+      `unsupported Responses tool type: ${String(raw.type)}; hosted tools (web_search, file_search, computer, shell, apply_patch) are not implemented`,
+    );
+  }
   if (!name || !/^[a-zA-Z0-9_-]{1,128}$/.test(name)) {
     throw invalidRequest("tool name must match [a-zA-Z0-9_-]{1,128}");
   }
@@ -160,6 +218,7 @@ function parseResponsesTool(value: unknown): AnthropicTool {
       parameters && typeof parameters === "object"
         ? (parameters as Record<string, unknown>)
         : { type: "object", properties: {} },
+    ...(type === "custom" || (name === "exec" && type !== "function") ? { wire: "custom" as const } : {}),
   };
 }
 
@@ -192,16 +251,23 @@ function parseInput(input: unknown): { messages: AnthropicMessage[]; systemParts
     const raw = item as Record<string, unknown>;
     const type = typeof raw.type === "string" ? raw.type : inferItemType(raw);
 
-    if (type === "function_call_output") {
+    if (type === "additional_tools" || type === "compaction" || type === "compaction_trigger") {
+      // Codex Lite advertises hosted/function/custom tools as an input item.
+      // When top-level tools is not an array, function+custom are lifted
+      // separately; nested hosted tools and compaction summaries are skipped.
+      continue;
+    }
+
+    if (isCodexHistoryOutput(type)) {
       flushAssistant();
-      pendingResults.push(parseFunctionCallOutput(raw));
+      pendingResults.push(parseFunctionCallOutput(adaptCustomToolOutput(mapCodexHistoryOutput(raw))));
       continue;
     }
 
     flushResults();
 
-    if (type === "function_call") {
-      pendingAssistant.push(parseFunctionCall(raw));
+    if (isCodexHistoryCall(type)) {
+      pendingAssistant.push(parseFunctionCall(adaptCustomToolCall(mapCodexHistoryCall(raw))));
       continue;
     }
     if (type === "reasoning") {
@@ -220,7 +286,9 @@ function parseInput(input: unknown): { messages: AnthropicMessage[]; systemParts
       pushMessageItem(messages, systemParts, raw);
       continue;
     }
-    throw invalidRequest(`unsupported input item type: ${String(type)}`);
+    // Codex resumes replay session-only item types (item_reference, etc.).
+    // Rejecting them 400s the whole turn; skip and keep the user/tool history.
+    continue;
   }
 
   flushResults();
@@ -275,25 +343,70 @@ function parseFunctionCallOutput(
 }
 
 function stringifyResponsesToolOutput(output: unknown): string {
-  if (typeof output === "string") return output;
+  if (typeof output === "string") {
+    return encodeCodexToolOutput(output) || output;
+  }
   if (!Array.isArray(output)) {
+    if (output && typeof output === "object") return encodeCodexToolOutput(output);
     throw invalidRequest("function_call_output.output must be a string or text content array");
   }
-  return output
-    .map((part) => {
-      if (!part || typeof part !== "object" || Array.isArray(part)) {
-        throw invalidRequest("function_call_output.output array items must be text content objects");
-      }
-      const raw = part as Record<string, unknown>;
-      if (raw.type !== "input_text" && raw.type !== "output_text" && raw.type !== "text") {
-        throw invalidRequest(
-          `function_call_output.output must contain only text content; unsupported type: ${String(raw.type)}`,
-        );
-      }
-      if (typeof raw.text !== "string") throw invalidRequest(`${String(raw.type)} tool output requires text`);
-      return raw.text;
-    })
-    .join("\n");
+  // Fail closed on images/files, then unwrap code-mode JSON text items.
+  const texts = output.map((part) => {
+    if (!part || typeof part !== "object" || Array.isArray(part)) {
+      throw invalidRequest("function_call_output.output array items must be text content objects");
+    }
+    const raw = part as Record<string, unknown>;
+    if (raw.type !== "input_text" && raw.type !== "output_text" && raw.type !== "text") {
+      throw invalidRequest(
+        `function_call_output.output must contain only text content; unsupported type: ${String(raw.type)}`,
+      );
+    }
+    if (typeof raw.text !== "string") throw invalidRequest(`${String(raw.type)} tool output requires text`);
+    return raw.text;
+  });
+  const extracted = encodeCodexToolOutput(output);
+  if (extracted.trim()) return extracted;
+  return texts.join("\n");
+}
+
+function adaptCustomToolCall(raw: Record<string, unknown>): Record<string, unknown> {
+  const callId = firstString(raw.call_id, raw.id);
+  const args = raw.arguments !== undefined && raw.arguments !== null && raw.arguments !== ""
+    ? raw.arguments
+    : encodeToolInput(raw.input);
+  return { ...raw, call_id: callId, arguments: args };
+}
+
+function adaptCustomToolOutput(raw: Record<string, unknown>): Record<string, unknown> {
+  const callId = firstString(raw.call_id, raw.id);
+  const output = raw.output !== undefined ? raw.output : raw.result;
+  return { ...raw, call_id: callId, output };
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+function encodeToolInput(value: unknown): unknown {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    try {
+      JSON.parse(trimmed);
+      return trimmed;
+    } catch {
+      return JSON.stringify({ input: value });
+    }
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify({ input: String(value) });
+  }
 }
 
 function parseFunctionCall(raw: Record<string, unknown>): Extract<AnthropicContentBlock, { type: "tool_use" }> {
