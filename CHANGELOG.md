@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Outbound assistant/thinking text rewrites standalone Cursor identity mentions to the model family's client: Claude/sonnet/haiku/opus → Claude, GPT/Codex/o-series → Codex, Gemini → Gemini, Grok → Grok. Ambiguous composer models follow the incoming CLI (Claude Code / Codex Lite). No brand → leave Cursor. Paths, @cursor/sdk, and cursor-sdk2api are left alone.
+
+- CCR-style host grounding: write AGENTS.md into the isolated SDK workspace, put host facts at the prompt head and tail, and correct scratch-path tool args (first 3 per session). Soft harness so Sonnet does not treat the client cwd as injection.
+
+- New `src/cursor-sdk-bridge` module (CCR-style bridge mode): Claude Code and Codex Lite client harness/instruction-library prompts stop at the gateway; only client cwd/roots are injected. Cursor built-ins stay denied. Isolated-workspace tool args are rewritten to the client cwd. Future prompt/tool optimizations live in this module.
+
+- Anthropic `/v1/messages` now strips Claude Code CLI system/environment preambles before they reach the Cursor Agent prompt. When client tools are present, a short caller-workspace harness is injected (cwd taken from the stripped env) instead of forwarding the CLI identity novel.
+
+- Codex exec wrap now unwraps Cursor `exec` input when it is a JSON string (or `{input: ...}` wrapper) of `{cmd, workdir}`. Live 0.147 calls were wrapping that JSON as the shell command, so `cat`/`apply_patch` never ran and heredoc newlines stayed escaped.
+
+- Codex exec wrap now injects `<environment_context>` cwd as official `exec_command.workdir` and rewrites relative `apply_patch` file headers to that absolute path (0.147 `tools.apply_patch` is patch-string only; no invented workdir arg). Harness says apply_patch/exec MUST use the client absolute path and never edit the empty SDK cwd.
+
+- Codex exec wrap now lifts a shell `apply_patch` heredoc (`*** Begin Patch` ... `*** End Patch`) to nested `tools.apply_patch`, instead of running a missing `apply_patch` binary via `exec_command`.
+- Codex code-mode `custom_tool_call_output` now unwraps the official content-item array (header + JSON `{output, exit_code, wall_time_seconds}`) and `{stdout,stderr}` so follow-up prompts include the listing. Wrapped exec emits `text((await tools.exec_command(...)).output)` so the model-facing result is not header-only. Harness still warns that the SDK cwd is not the project, but a successful exec/tool_result listing is authoritative.
+- Codex `custom_tool_call_output` now extracts stdout/stderr/exit (empty `output` objects no longer wipe a string stdout) and history replay keeps that text in the Cursor prompt.
+- Cursor exec args are converted to Codex code-mode JS (`await tools.exec_command({ cmd })`).
+- Codex Lite requests that arrive without a client `exec` tool now get a synthetic custom `exec` so Cursor can call it and the gateway can emit `custom_tool_call` for the Codex client. Catalog is logged (names/types only).
+- Codex Lite developer instruction library + `<environment_context>` (cwd/workspace_roots/permissions) are stripped at the gateway; only client cwd/roots are injected via the short harness. History shell/apply_patch/custom calls convert both ways; hosted tools still fail closed. SDK empty cwd is labeled non-authoritative.
+- Responses lifts Codex Lite `additional_tools` `type:custom` (e.g. exec) as client tools and re-emits them as `custom_tool_call` so the outer agent runs them in the caller workspace. Hosted tools still fail closed.
+- Responses now accepts Codex/sub2api `text.format` (including `json_schema`), maps `custom_tool_call` / `custom_tool_call_output` onto function tools, and skips other session-only input items (`additional_tools`, `compaction`, unknown types) so resumed Codex sessions no longer 400. Hosted tools in top-level `tools`, `previous_response_id`, and `store=true` still fail closed.
+
+- Anthropic `/v1/messages` now accepts sub2api-style `system`/`developer` (folded into `system`) and `tool`/`function` (mapped to user `tool_result`) roles so those clients no longer 422.
 - `/v1/account` now reads current-period spending, remaining included usage, model-family percentages, plan metadata, and limits through Cursor Dashboard using the same User API Key, without Cookie or Team Admin credentials. Missing usage remains a partial response rather than a fabricated zero quota.
 - Added authenticated `/v1/messages/count_tokens` as an explicitly marked local estimate for Claude Code context management; it never starts an SDK run or participates in billing.
 

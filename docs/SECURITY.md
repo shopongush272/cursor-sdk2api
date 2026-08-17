@@ -8,7 +8,7 @@
 
 ## Tool isolation
 
-The API Compatibility Profile does not grant Cursor ambient filesystem or shell tools. Workspace is an empty directory owned by this process. `settingSources` is empty.
+The API Compatibility Profile does not grant Cursor ambient filesystem or shell tools. Workspace is an empty directory owned by this process. `settingSources` is project only, from the isolated workspace AGENTS.md we write; user/team/mdm stay off.
 
 ## Operator console
 

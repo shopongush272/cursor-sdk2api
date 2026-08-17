@@ -10,3 +10,13 @@ tmp/
 _temp/
 .cursor-sdk2api/
 *.tsbuildinfo
+
+# local planning-with-files (do not push)
+.planning/
+task_plan.md
+findings.md
+progress.md
+
+# local runtime / secrets (do not push)
+.gateway-key
+state/
