@@ -54,6 +54,13 @@ export class Session {
   lastResultDigest?: string;
   appliedBoundaryId?: string;
   closeReason?: string;
+  readonly customToolNames = new Set<string>();
+  clientCwd?: string;
+  clientPlatform?: string;
+  clientRoots?: string[];
+  isolatedWorkspaceDir?: string;
+  scratchPathCorrections = 0;
+  clientBrand?: import("../cursor-sdk-bridge/identity.js").ClientBrand;
 
   constructor(input: {
     credentialFingerprint: string;
